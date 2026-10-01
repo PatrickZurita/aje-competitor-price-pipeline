@@ -18,9 +18,9 @@ Esto es preferible a inventar precios, usar equivalencias no verificadas o inten
 
 ## Búsqueda de producto común — 1 de octubre de 2026
 
-Se revisó el listado visible de la URL objetivo de Flora y Fauna. La categoría expuso ocho productos: Mishki SPF 30; dos geles shower YXIA IV; tres body serums YXIA IV; y dos productos Attitude.
+Se revisó el listado paginado de `https://www.florayfauna.pe/cuidado`. Aunque la interfaz declara 186 productos, la consulta web expuso cuatro páginas con 32 productos actuales. Corresponden principalmente a las marcas Mishki, YXIA IV, Faria, Nua, Bamboo Balance, Catalina Bath y Badger.
 
-No se identificó una coincidencia de producto y presentación verificable en los catálogos públicos de Dermashop e Inkafarma para esos ocho artículos. Por ello no se añadió un segundo producto objetivo ni se ejecutó una comparación de tres precios que pudiera ser engañosa.
+No se identificó una coincidencia de producto y presentación verificable en los catálogos públicos de Dermashop e Inkafarma para esos 32 artículos. Por ello no se añadió un segundo producto objetivo ni se ejecutó una comparación de tres precios que pudiera ser engañosa.
 
 Esta validación no invalida el pipeline: confirma que el tratamiento de ausencia de datos, reintentos, SQS y notificación funciona. Para demostrar una comparación comercial completa se necesita cambiar al menos una de estas condiciones:
 
