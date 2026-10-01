@@ -1,0 +1,281 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Serverless pipeline to compare dermo-cosmetic competitor prices.
+
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+
+Parameters:
+  GoogleOAuthSecretArn:
+    Type: String
+    Description: Existing Secrets Manager ARN with Google OAuth credentials and refresh token.
+  GoogleDriveRootFolderId:
+    Type: String
+    Default: root
+    Description: Google Drive folder ID where YYYY/MM folders will be created.
+
+Globals:
+  Function:
+    Runtime: python3.13
+    Timeout: 30
+    MemorySize: 512
+    Tracing: Active
+    Environment:
+      Variables:
+        RAW_BUCKET_NAME: !Ref RawEvidenceBucket
+        OBSERVATIONS_TABLE_NAME: !Ref ObservationsTable
+        GOOGLE_OAUTH_SECRET_ARN: !Ref GoogleOAuthSecretArn
+        GOOGLE_DRIVE_ROOT_FOLDER_ID: !Ref GoogleDriveRootFolderId
+
+Resources:
+  RawEvidenceBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Preserves normalized extraction evidence by run and store.
+        must: Keep private, encrypted and retained when the stack is deleted.
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+
+  ObservationsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Stores price observations grouped by monitoring run.
+        must: Use on-demand capacity and retain data during stack deletion.
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+
+  NotificationDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Keeps notification messages that cannot be sent after retries.
+        must: Remain private and encrypted with SQS managed encryption.
+    Properties:
+      SqsManagedSseEnabled: true
+
+  FailureQueue:
+    Type: AWS::SQS::Queue
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Decouples failed extraction or report events from notification delivery.
+        must: Retain failures for retry by the notifier Lambda.
+    Properties:
+      SqsManagedSseEnabled: true
+      VisibilityTimeout: 60
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt NotificationDeadLetterQueue.Arn
+        maxReceiveCount: 3
+
+  ScraperFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Fetches one target site, writes evidence and saves normalized observations.
+        must: Access only the evidence bucket and observations table.
+    Properties:
+      CodeUri: ../build/
+      Handler: handlers.scraper
+      Policies:
+        - S3WritePolicy:
+            BucketName: !Ref RawEvidenceBucket
+        - DynamoDBWritePolicy:
+            TableName: !Ref ObservationsTable
+
+  ReportFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Computes lowest prices and creates the Google Sheets report.
+        must: Read observations and only the specified OAuth secret.
+    Properties:
+      CodeUri: ../build/
+      Handler: handlers.report
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref ObservationsTable
+        - Statement:
+            Effect: Allow
+            Action: secretsmanager:GetSecretValue
+            Resource: !Ref GoogleOAuthSecretArn
+
+  NotifierFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Sends failure notifications to the required recipient through Gmail API.
+        must: Read only the OAuth secret and process messages from FailureQueue.
+    Properties:
+      CodeUri: ../build/
+      Handler: handlers.notifier
+      Environment:
+        Variables:
+          NOTIFICATION_RECIPIENT: oscar.toledo@ajegroup.com
+      Policies:
+        - Statement:
+            Effect: Allow
+            Action: secretsmanager:GetSecretValue
+            Resource: !Ref GoogleOAuthSecretArn
+      Events:
+        FailedPipelineEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt FailureQueue.Arn
+            BatchSize: 1
+
+  PipelineStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Makes extraction retries, failures and report sequencing visible and auditable.
+        must: Send terminal failures to FailureQueue and invoke only the pipeline functions.
+    Properties:
+      Type: STANDARD
+      Tracing:
+        Enabled: true
+      Policies:
+        - LambdaInvokePolicy:
+            FunctionName: !Ref ScraperFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref ReportFunction
+        - Statement:
+            Effect: Allow
+            Action: sqs:SendMessage
+            Resource: !GetAtt FailureQueue.Arn
+      DefinitionSubstitutions:
+        ScraperFunctionArn: !GetAtt ScraperFunction.Arn
+        ReportFunctionArn: !GetAtt ReportFunction.Arn
+        FailureQueueUrl: !Ref FailureQueue
+      Definition:
+        StartAt: ExtractAllStores
+        States:
+          ExtractAllStores:
+            Type: Map
+            ItemsPath: $.targets
+            MaxConcurrency: 1
+            ResultPath: $.extractions
+            ItemSelector:
+              runId.$: $.runId
+              target.$: $$.Map.Item.Value
+            ItemProcessor:
+              ProcessorConfig:
+                Mode: INLINE
+              StartAt: ExtractStore
+              States:
+                ExtractStore:
+                  Type: Task
+                  Resource: arn:aws:states:::lambda:invoke
+                  OutputPath: $.Payload
+                  Parameters:
+                    FunctionName: ${ScraperFunctionArn}
+                    Payload:
+                      runId.$: $.runId
+                      target.$: $.target
+                  Retry:
+                    - ErrorEquals:
+                        - States.TaskFailed
+                      IntervalSeconds: 2
+                      MaxAttempts: 3
+                      BackoffRate: 2
+                  Catch:
+                    - ErrorEquals:
+                        - States.ALL
+                      ResultPath: $.failure
+                      Next: QueueFailure
+                  End: true
+                QueueFailure:
+                  Type: Task
+                  Resource: arn:aws:states:::sqs:sendMessage
+                  Parameters:
+                    QueueUrl: ${FailureQueueUrl}
+                    MessageBody.$: States.JsonToString($)
+                  End: true
+            Next: GenerateReport
+          GenerateReport:
+            Type: Task
+            Resource: arn:aws:states:::lambda:invoke
+            OutputPath: $.Payload
+            Parameters:
+              FunctionName: ${ReportFunctionArn}
+              Payload:
+                runId.$: $.runId
+            Retry:
+              - ErrorEquals:
+                  - States.TaskFailed
+                IntervalSeconds: 2
+                MaxAttempts: 3
+                BackoffRate: 2
+            Catch:
+              - ErrorEquals:
+                  - States.ALL
+                ResultPath: $.failure
+                Next: QueueReportFailure
+            End: true
+          QueueReportFailure:
+            Type: Task
+            Resource: arn:aws:states:::sqs:sendMessage
+            Parameters:
+              QueueUrl: ${FailureQueueUrl}
+              MessageBody.$: States.JsonToString($)
+            End: true
+
+  DispatcherFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Starts one state machine execution for the scheduled monitoring run.
+        must: Start only PipelineStateMachine executions.
+    Properties:
+      CodeUri: ../build/
+      Handler: handlers.dispatcher
+      Environment:
+        Variables:
+          STATE_MACHINE_ARN: !Ref PipelineStateMachine
+      Policies:
+        - Statement:
+            Effect: Allow
+            Action: states:StartExecution
+            Resource: !Ref PipelineStateMachine
+      Events:
+        DailyMonitoring:
+          Type: Schedule
+          Properties:
+            Schedule: cron(0 13 * * ? *)
+            Enabled: true
+
+Outputs:
+  StateMachineArn:
+    Description: State machine ARN for manual test executions.
+    Value: !Ref PipelineStateMachine
+  RawEvidenceBucketName:
+    Description: Bucket with raw extraction evidence.
+    Value: !Ref RawEvidenceBucket
+  FailureQueueUrl:
+    Description: Queue containing terminal pipeline failures.
+    Value: !Ref FailureQueue

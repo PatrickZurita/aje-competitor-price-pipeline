@@ -1,0 +1,12 @@
+build/
+.venv/
+__pycache__/
+.pytest_cache/
+credentials.json
+token.json
+.env
+*.pem
+.venv/
+build/
+packaged.yaml
+local-secrets/
