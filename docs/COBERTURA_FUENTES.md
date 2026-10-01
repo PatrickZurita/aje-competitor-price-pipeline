@@ -16,6 +16,18 @@ La configuración declara un producto objetivo y cada tienda intenta obtener una
 
 Esto es preferible a inventar precios, usar equivalencias no verificadas o intentar eludir protecciones de los sitios. El reporte se genera con las observaciones válidas; los fallos quedan visibles como evidencia operacional.
 
+## Búsqueda de producto común — 1 de octubre de 2026
+
+Se revisó el listado visible de la URL objetivo de Flora y Fauna. La categoría expuso ocho productos: Mishki SPF 30; dos geles shower YXIA IV; tres body serums YXIA IV; y dos productos Attitude.
+
+No se identificó una coincidencia de producto y presentación verificable en los catálogos públicos de Dermashop e Inkafarma para esos ocho artículos. Por ello no se añadió un segundo producto objetivo ni se ejecutó una comparación de tres precios que pudiera ser engañosa.
+
+Esta validación no invalida el pipeline: confirma que el tratamiento de ausencia de datos, reintentos, SQS y notificación funciona. Para demostrar una comparación comercial completa se necesita cambiar al menos una de estas condiciones:
+
+1. Una URL de Flora y Fauna que exponga un producto vendido también por los otros dos competidores.
+2. URLs directas de un mismo SKU/EAN en las tres tiendas.
+3. Un catálogo de equivalencias aprobado por la Gerencia Comercial.
+
 ## Siguiente incremento
 
 Para cobertura completa de tres tiendas, el responsable funcional debe confirmar uno de estos criterios:
